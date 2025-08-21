@@ -72,7 +72,59 @@ class Database:
             """
         )
         conn.commit()
+        # Perform migrations after ensuring base schema
+        try:
+            self._migrate_videos_unique_constraint(conn)
+        except Exception as e:
+            print(f"Migration warning: {e}")
         conn.close()
+
+    def _migrate_videos_unique_constraint(self, conn):
+        """Migrate videos table UNIQUE(file_name,user_chat_id) -> UNIQUE(file_id,user_chat_id)."""
+        cursor = conn.cursor()
+        # Detect existing indexes referencing file_name & user_chat_id as unique combo
+        cursor.execute("PRAGMA index_list(videos)")
+        indexes = cursor.fetchall()
+        needs_migration = False
+        for idx in indexes:
+            idx_name = idx[1]
+            cursor.execute("PRAGMA index_info(%s)" % idx_name)
+            cols = [r[2] for r in cursor.fetchall()]
+            if set(cols) == {"file_name", "user_chat_id"}:
+                # confirm uniqueness changed target
+                needs_migration = True
+                break
+        if not needs_migration:
+            return
+        # Rebuild table
+        cursor.execute("BEGIN TRANSACTION")
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS videos_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_chat_id INTEGER NOT NULL,
+                file_id TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                duration INTEGER NOT NULL,
+                flight_date INTEGER NOT NULL,
+                time_slot TEXT NOT NULL,
+                flight_number TEXT NOT NULL,
+                camera_name TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_chat_id) REFERENCES users (chat_id),
+                UNIQUE(file_id, user_chat_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO videos_new (id,user_chat_id,file_id,file_name,duration,flight_date,time_slot,flight_number,camera_name,created_at)
+            SELECT id,user_chat_id,file_id,file_name,duration,flight_date,time_slot,flight_number,camera_name,created_at FROM videos
+            """
+        )
+        cursor.execute("DROP TABLE videos")
+        cursor.execute("ALTER TABLE videos_new RENAME TO videos")
+        cursor.execute("COMMIT")
     
     def get_connection(self):
         """Get database connection."""
@@ -101,7 +153,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute('SELECT chat_id, username FROM users WHERE username = ?', (username,))
+            cursor.execute('SELECT chat_id, username FROM users WHERE LOWER(username) = LOWER(?)', (username,))
             row = cursor.fetchone()
             if row:
                 return {'chat_id': row[0], 'username': row[1]}
@@ -141,6 +193,22 @@ class Database:
             return False
         finally:
             conn.close()
+
+    def delete_video_by_id(self, user_chat_id: int, video_id: int) -> bool:
+        """Delete a single video by its DB id for a user."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                DELETE FROM videos WHERE user_chat_id = ? AND id = ?
+            ''', (user_chat_id, video_id))
+            conn.commit()
+            return cursor.rowcount > 0
+        except Exception as e:
+            print(f"Error deleting video by id: {e}")
+            return False
+        finally:
+            conn.close()
     
     def get_videos_by_user(self, chat_id: int) -> List[Dict]:
         """Get all videos for a user organized by date and session."""
@@ -148,7 +216,7 @@ class Database:
         cursor = conn.cursor()
         try:
             cursor.execute('''
-                SELECT flight_date, time_slot, flight_number, camera_name, file_id, file_name, duration
+                SELECT id, flight_date, time_slot, flight_number, camera_name, file_id, file_name, duration
                 FROM videos
                 WHERE user_chat_id = ?
                 ORDER BY flight_date, time_slot, flight_number, 
@@ -164,13 +232,14 @@ class Database:
             videos = []
             for row in cursor.fetchall():
                 videos.append({
-                    'flight_date': row[0],
-                    'time_slot': row[1],
-                    'flight_number': row[2],
-                    'camera_name': row[3],
-                    'file_id': row[4],
-                    'file_name': row[5],
-                    'duration': row[6]
+                    'id': row[0],
+                    'flight_date': row[1],
+                    'time_slot': row[2],
+                    'flight_number': row[3],
+                    'camera_name': row[4],
+                    'file_id': row[5],
+                    'file_name': row[6],
+                    'duration': row[7]
                 })
             return videos
         finally:
@@ -208,6 +277,7 @@ class Database:
             
             # Add video
             flight['videos'].append({
+                'id': video['id'],
                 'camera_name': video['camera_name'],
                 'file_id': video['file_id'],
                 'file_name': video['file_name']

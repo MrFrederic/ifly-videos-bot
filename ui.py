@@ -140,5 +140,12 @@ def create_flight_view_keyboard(organized_data: dict, day_index: int, session_in
         InlineKeyboardButton("← Back", callback_data=f"nav:session:{day_index}:{session_index}"),
         InlineKeyboardButton("🏠 Home", callback_data="home")
     ])
+
+    # Delete buttons (two-step confirmation)
+    current_video_obj = videos[current_video] if videos else None
+    if current_video_obj:
+        keyboard.append([
+            InlineKeyboardButton("🗑️ Delete", callback_data=f"del:ask:{day_index}:{session_index}:{flight_index}:{current_video}:{current_video_obj['id']}")
+        ])
     
     return InlineKeyboardMarkup(keyboard)

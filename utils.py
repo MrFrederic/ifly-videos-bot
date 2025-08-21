@@ -13,26 +13,42 @@ def parse_filename(filename: str) -> tuple:
         filename = filename.replace('-', '_')
         parts = filename.split('_')
         
-        # Accept two patterns:
-        # Pattern A (9 parts): prefix Camera Flight YYYY MM DD HH MM extra
-        # Pattern B (>=11 parts): more verbose names containing a detectable year token
+        # Pattern A (legacy, 9 parts after replacement): prefix Camera Flight YYYY MM DD HH MM extra
+        # Example: ifly_Door_F001_2025_08_21_14_30_001.mp4
         if len(parts) == 9 and re.fullmatch(r"20\d{2}", parts[4]):
-            # ifly_Door_F001_2025_08_21_14_30_001.mp4
             camera_name = parts[1]
             flight_number = parts[2] if parts[2].startswith('F') else parts[3]
             year, month, day = parts[4:7]
             hour, minute = parts[7:9]
+        # Pattern B (current long form, >=10 parts): Location Event Camera Flight YYYY MM DD HH MM SS
+        # Example original: iFlyMinsk_iFLYPROEvents_Door_10_2025-08-17_21-30-33.mp4
+        # After replacement: iFlyMinsk_iFLYPROEvents_Door_10_2025_08_17_21_30_33.mp4
+        elif len(parts) >= 10 and re.fullmatch(r"20\d{2}", parts[4]):
+            camera_name = parts[2]
+            raw_flight = parts[3]
+            # Normalize flight number to F### if numeric
+            if raw_flight.startswith('F'):
+                flight_number = raw_flight
+            else:
+                # Pad numeric with zeros to maintain ordering, assume up to 3 digits
+                flight_number = f"F{int(raw_flight):03d}" if raw_flight.isdigit() else raw_flight
+            year, month, day = parts[4:7]
+            hour, minute = parts[7:9]
         else:
-            # Fallback generic detection
-            year_index = None
-            for i, p in enumerate(parts):
-                if re.fullmatch(r"20\d{2}", p):
-                    year_index = i
-                    break
+            # Generic fallback: find year token anywhere
+            year_index = next((i for i,p in enumerate(parts) if re.fullmatch(r"20\d{2}", p)), None)
             if year_index is None or year_index + 4 >= len(parts):
                 raise ValueError("Could not locate date components in filename")
-            camera_name = parts[1]
-            flight_number = parts[2] if parts[2].startswith('F') else parts[3]
+            # Heuristic: camera likely immediately before flight or at index 1
+            # We try to detect camera by known names
+            known_cameras = {"Door", "Centerline", "Firsttimer", "Sideline"}
+            camera_name = next((p for p in parts if p in known_cameras), parts[1])
+            # Flight number: token starting with F or numeric near camera
+            flight_number = next((p for p in parts if p.startswith('F') and len(p) <= 5), None)
+            if not flight_number:
+                # numeric token just before year maybe
+                cand = parts[year_index - 1] if year_index - 1 >= 0 else '1'
+                flight_number = f"F{int(cand):03d}" if cand.isdigit() else cand
             year, month, day = parts[year_index:year_index+3]
             hour, minute = parts[year_index+3:year_index+5]
 

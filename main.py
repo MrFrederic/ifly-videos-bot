@@ -71,8 +71,6 @@ class iFLYBot:
                 text = ("Available commands:\n"
                        "/start \\- Shows menu\n"
                        "/help \\- Shows this message\n"
-                       "/info \\- Shows info message\n"
-                       "/clear\\_data \\- Careful\\! Deletes all saved videos\\!\n\n"
                        "To upload videos \\- just drop them here\\. Bot will automatically find their correct flight\\.")
             
             await self.send_closable_message(update, text)
@@ -122,6 +120,36 @@ class iFLYBot:
                 await update.message.reply_text(text, parse_mode='MarkdownV2', reply_markup=reply_markup)
         except Exception as e:
             log.error(f"Error showing start menu: {e}")
+
+    async def show_start_menu_with_session(self, update: Update, context: CallbackContext, username: str, expires_time: datetime):
+        """Show the main start menu with active session info."""
+        try:
+            remaining = int((expires_time - datetime.now()).total_seconds() // 60)
+            text = (f"🏠 Welcome to the *iFLY Video Storage Bot*\\!\n\n"
+                   f"🟢 *Active Session*\n"
+                   f"Videos from iFLY chat will be stored here until "
+                   f"{escape_markdown(expires_time.strftime('%H:%M'))} \\(~{remaining} min\\)\\.\n\n"
+                   f"Use buttons to navigate\\.")
+            keyboard = [
+                [
+                    InlineKeyboardButton("🎥 Browse Videos", callback_data="nav:library"),
+                    InlineKeyboardButton("📊 My Stats", callback_data="stats")
+                ],
+                [
+                    InlineKeyboardButton("🛑 End Session", callback_data="end_session")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            chat_id = update.callback_query.from_user.id
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode='MarkdownV2',
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            log.error(f"Error showing start menu with session: {e}")
     
     async def show_statistics(self, update: Update, context: CallbackContext):
         """Show user statistics."""
@@ -295,19 +323,30 @@ class iFLYBot:
     async def ask_for_username(self, update: Update, context: CallbackContext):
         """Ask for username in iFLY chat."""
         try:
-            text = "To upload videos \\- please send your username"
+            session = self.db.get_active_session()
+            if session:
+                expires_dt = datetime.fromtimestamp(session['expires_at'])
+                remaining = session['expires_at'] - int(datetime.now().timestamp())
+                mins = max(1, remaining // 60)
+                text = (f"✅ *Session active for @{escape_markdown(session['username'])}*\n\n"
+                        f"Expires at {escape_markdown(expires_dt.strftime('%H:%M'))} UTC \\(in {mins} min\\)\\.")
+                reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 End Session", callback_data="auth:end")]])
+            else:
+                text = "To upload videos \\- please send your username"
+                reply_markup = None
             
             # Get or create menu message
             menu_message_id = self.db.get_system_value("ifly_menu_message_id")
             if menu_message_id:
                 try:
-                    await context.bot.edit_message_text(text, self.config.ifly_chat_id, int(menu_message_id))
-                except:
+                    await context.bot.edit_message_text(text, self.config.ifly_chat_id, int(menu_message_id), parse_mode='MarkdownV2', reply_markup=reply_markup)
+                except Exception as e:
+                    log.error(f"Error editing message: {e}")
                     # Create new message if edit fails
-                    message = await context.bot.send_message(self.config.ifly_chat_id, text)
+                    message = await context.bot.send_message(self.config.ifly_chat_id, text, parse_mode='MarkdownV2', reply_markup=reply_markup)
                     self.db.set_system_value("ifly_menu_message_id", str(message.message_id))
             else:
-                message = await context.bot.send_message(self.config.ifly_chat_id, text)
+                message = await context.bot.send_message(self.config.ifly_chat_id, text, parse_mode='MarkdownV2', reply_markup=reply_markup)
                 self.db.set_system_value("ifly_menu_message_id", str(message.message_id))
         except Exception as e:
             log.error(f"Error asking for username: {e}")
@@ -325,19 +364,28 @@ class iFLYBot:
             user = self.db.get_user_by_username(username)
             
             if user:
-                text = f"Found user @{escape_markdown(username)}\\. Start session?"
-                keyboard = [
-                    [
-                        InlineKeyboardButton("✅ Yes", callback_data=f"auth:start:{user['chat_id']}:{username}"),
-                        InlineKeyboardButton("❌ No", callback_data="auth:cancel")
-                    ]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
+                # Ask the target user for confirmation in private chat
+                try:
+                    confirm_keyboard = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("✅ Allow", callback_data=f"auth:confirm:{user['chat_id']}:{username}"),
+                            InlineKeyboardButton("❌ Deny", callback_data=f"auth:deny:{user['chat_id']}:{username}")
+                        ]
+                    ])
+                    await context.bot.send_message(
+                        chat_id=user['chat_id'],
+                        text=(f"🔐 *Authorization Request*\n" \
+                              f"iFLY staff wants to enable uploads from this chat for *@{escape_markdown(username)}*\n" \
+                              f"Allow videos from iFLY chat to be stored in your library for the next {self.config.session_length_minutes} minutes?"),
+                        parse_mode='MarkdownV2',
+                        reply_markup=confirm_keyboard
+                    )
+                    staff_text = f"Sent authorization request to @{escape_markdown(username)}\. Waiting for user to confirm\."
+                except Exception as send_err:
+                    staff_text = f"Failed to send confirmation to user: {escape_markdown(send_err)}"
                 menu_message_id = self.db.get_system_value("ifly_menu_message_id")
                 if menu_message_id:
-                    await context.bot.edit_message_text(text, self.config.ifly_chat_id, int(menu_message_id), 
-                                                      parse_mode='MarkdownV2', reply_markup=reply_markup)
+                    await context.bot.edit_message_text(staff_text, self.config.ifly_chat_id, int(menu_message_id), parse_mode='MarkdownV2')
             else:
                 text = f"User @{escape_markdown(username)} not found\\. Please try again or ask them to start the bot first\\."
                 menu_message_id = self.db.get_system_value("ifly_menu_message_id")
@@ -361,11 +409,47 @@ class iFLYBot:
                     text = (f"✅ *Session started for @{escape_markdown(username)}*\n\n"
                            f"You can now send videos\\. Session expires at "
                            f"{escape_markdown(expires_time.strftime('%H:%M'))}\\.")
-                    keyboard = [[InlineKeyboardButton("🛑 End Session", callback_data="auth:end")]]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 End Session", callback_data="auth:end")]])
                 else:
                     text = "❌ Failed to start session\\. Please try again\\."
                     reply_markup = None
+            elif action == "confirm":
+                # User confirmed authorization in private chat
+                parts = data.split(':')
+                target_chat_id = int(parts[0])
+                username = parts[1]
+                success = self.db.create_session(target_chat_id, username, self.config.session_length_minutes)
+                if success:
+                    expires_time = datetime.now() + timedelta(minutes=self.config.session_length_minutes)
+                    # Notify staff chat
+                    staff_text = (f"✅ *Session started for @{escape_markdown(username)}*\n\n"
+                                  f"Session expires at {escape_markdown(expires_time.strftime('%H:%M'))} UTC")
+                    menu_message_id = self.db.get_system_value("ifly_menu_message_id")
+                    if menu_message_id:
+                        await context.bot.edit_message_text(
+                            staff_text,
+                            self.config.ifly_chat_id,
+                            int(menu_message_id),
+                            parse_mode='MarkdownV2',
+                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 End Session", callback_data="auth:end")]])
+                        )
+                    # Delete confirmation message to avoid clutter
+                    await update.callback_query.message.delete()
+                    # Show updated home screen with session info
+                    await self.show_start_menu_with_session(update, context, username, expires_time)
+                else:
+                    await update.callback_query.edit_message_text("❌ Failed to start session. Try again later.")
+                return
+            elif action == "deny":
+                parts = data.split(':')
+                username = parts[1]
+                # Delete confirmation message to avoid clutter
+                await update.callback_query.message.delete()
+                # Notify staff
+                menu_message_id = self.db.get_system_value("ifly_menu_message_id")
+                if menu_message_id:
+                    await context.bot.edit_message_text(f"❌ @{escape_markdown(username)} denied the authorization request.", self.config.ifly_chat_id, int(menu_message_id), parse_mode='MarkdownV2')
+                return
             elif action == "cancel":
                 await self.ask_for_username(update, context)
                 return
@@ -401,6 +485,12 @@ class iFLYBot:
                     await self.handle_auth_callback(update, context, action, callback_data)
             else:
                 # Private chat callbacks
+                if parts[0] == "auth":
+                    # user confirming or denying
+                    action = parts[1]
+                    callback_data = ':'.join(parts[2:]) if len(parts) > 2 else None
+                    await self.handle_auth_callback(update, context, action, callback_data)
+                    return
                 if parts[0] == "home":
                     await self.show_start_menu(update, context, edit=True)
                 elif parts[0] == "stats":
@@ -420,9 +510,66 @@ class iFLYBot:
                 elif parts[0] == "video":
                     day_index, session_index, flight_index, video_index = map(int, parts[1:5])
                     await self.show_flight(update, context, day_index, session_index, flight_index, video_index)
+                elif parts[0] == "del":
+                    # deletion workflow: del:ask:indices or del:confirm:indices:file_id
+                    sub_action = parts[1]
+                    if sub_action == 'ask':
+                        day_index, session_index, flight_index, video_index, video_id = map(int, parts[2:7])
+                        # show confirmation buttons referencing id
+                        keyboard = [
+                            [InlineKeyboardButton("✅ Confirm", callback_data=f"del:confirm:{day_index}:{session_index}:{flight_index}:{video_index}:{video_id}")],
+                            [InlineKeyboardButton("↩️ Cancel", callback_data=f"video:{day_index}:{session_index}:{flight_index}:{video_index}")]
+                        ]
+                        try:
+                            await update.callback_query.edit_message_caption(
+                                caption=update.callback_query.message.caption + "\n\n⚠️ Delete this video?",
+                                reply_markup=InlineKeyboardMarkup(keyboard)
+                            )
+                        except Exception:
+                            pass
+                    elif sub_action == 'confirm':
+                        day_index, session_index, flight_index, video_index, video_id = map(int, parts[2:7])
+                        deleted = self.db.delete_video_by_id(update.callback_query.from_user.id, video_id)
+                        if deleted:
+                            # After deletion, show flight again (video_index clamp)
+                            organized = self.db.get_organized_videos(update.callback_query.from_user.id)
+                            try:
+                                flight_videos = organized['days'][day_index]['sessions'][session_index]['flights'][flight_index]['videos']
+                                new_index = min(video_index, len(flight_videos)-1) if flight_videos else 0
+                                if flight_videos:
+                                    await self.show_flight(update, context, day_index, session_index, flight_index, new_index)
+                                else:
+                                    # If no videos left in flight, go back to session view
+                                    await self.show_session(update, context, day_index, session_index)
+                            except Exception:
+                                await self.navigate_library(update, context)
+                        else:
+                            await update.callback_query.answer("Delete failed", show_alert=True)
                 elif parts[0] == "delete":
                     chat_id, message_id = int(parts[1]), int(parts[2])
                     await self.delete_message(context, chat_id, message_id)
+                elif parts[0] == "end_session":
+                    # User ending session from their private chat
+                    user_chat_id = update.callback_query.from_user.id
+                    session = self.db.get_active_session()
+                    if session and session['target_chat_id'] == user_chat_id:
+                        self.db.end_session()
+                        # Notify staff chat
+                        menu_message_id = self.db.get_system_value("ifly_menu_message_id")
+                        if menu_message_id:
+                            try:
+                                await context.bot.edit_message_text(
+                                    "Session ended by user\\. To upload videos \\- please send your username",
+                                    self.config.ifly_chat_id,
+                                    int(menu_message_id),
+                                    parse_mode='MarkdownV2'
+                                )
+                            except Exception:
+                                pass
+                        # Show normal home screen
+                        await self.show_start_menu(update, context, edit=True)
+                    else:
+                        await update.callback_query.answer("No active session found", show_alert=True)
         except Exception as e:
             log.error(f"Error handling callback: {e}")
 
