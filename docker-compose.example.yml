@@ -1,0 +1,19 @@
+services:
+  ifly-videos-bot:
+    build: .
+    container_name: ifly-videos-bot
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+    environment:
+      TZ: UTC
+      TELEGRAM_BOT_TOKEN: CHANGE_ME
+      TELEGRAM_IFLY_CHAT_ID: "123456789"
+      DATABASE_PATH: /app/data/videos.db
+      SESSION_LENGTH_MINUTES: "30"
+      LOG_LEVEL: INFO
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sqlite3; sqlite3.connect('/app/data/videos.db').execute('SELECT 1')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
